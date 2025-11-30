@@ -1,0 +1,328 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Workout Progress — Total Volume vs Date</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto; }
+    /* keep long pasted numbers from expanding layout; show ellipsis */
+    input[type="text"], input[type="number"], input[type="datetime-local"] {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* === Enforce equal column sizing for the 3 inputs (Weight / Sets / Reps) === */
+    /* Make each grid child a column container so inner flex doesn't expand the column */
+    .grid.grid-cols-3 > div {
+      min-width: 0;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Ensure inputs always take available width and don't break the grid */
+    .grid.grid-cols-3 > div input,
+    .grid.grid-cols-3 > div .flex {
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    /* Make the weight input share the space and let the badge keep its width */
+    .weight-row { display:flex; align-items:center; width:100%; min-width:0; }
+    .weight-row input { flex:1; min-width:0; }
+    .weight-row .badge { flex: 0 0 auto; }
+
+    /* optional: small consistent height for inputs */
+    input, select, textarea, button {
+      line-height: 1.4;
+    }
+  </style>
+</head>
+
+<body class="bg-slate-50">
+<div class="max-w-5xl mx-auto p-6">
+
+<header class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold">Workout Progress</h1>
+  <a href="/frontend/index.html" class="px-4 py-2 bg-slate-700 text-white rounded-md">Dashboard</a>
+</header>
+
+<!-- Combined Form -->
+<div class="bg-white p-4 rounded-xl shadow mb-6">
+  <!-- NOTE: Keep IDs same as your JS expects -->
+  <form id="combinedForm" class="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+
+    <!-- Exercise (left, wide) -->
+    <div class="md:col-span-6">
+      <label class="block text-sm text-slate-600 mb-1">Exercise</label>
+      <input id="exercise" placeholder="e.g. Leg Press" class="w-full rounded-md border px-3 py-2" />
+    </div>
+
+    <!-- Weight/Sets/Reps nested equal-width columns -->
+    <div class="md:col-span-6">
+      <label class="block text-sm text-slate-600 mb-1">Weight • Sets • Reps</label>
+
+      <!-- nested grid ensures three equal columns; min-w-0 prevents children from forcing overflow -->
+      <div class="grid grid-cols-3 gap-3">
+        <!-- Weight (input + kg badge) -->
+        <div class="min-w-0 w-full">
+          <label class="sr-only">Weight</label>
+          <div class="weight-row">
+            <input id="log-weight" type="number" inputmode="numeric" min="0"
+                   placeholder="Weight" class="rounded-l-md border px-3 py-2" />
+            <span class="badge px-3 py-2 bg-slate-100 border rounded-r-md text-slate-600">kg</span>
+          </div>
+        </div>
+
+        <!-- Sets -->
+        <div class="min-w-0 w-full">
+          <label class="sr-only">Sets</label>
+          <input id="log-sets" type="number" min="1" max="50" placeholder="Sets"
+                 class="w-full min-w-0 rounded-md border px-3 py-2" />
+        </div>
+
+        <!-- Reps -->
+        <div class="min-w-0 w-full">
+          <label class="sr-only">Reps</label>
+          <input id="log-reps" type="text" placeholder="Reps (8 or 3×8)"
+                 class="w-full min-w-0 rounded-md border px-3 py-2" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Date & time -->
+    <div class="md:col-span-3 lg:col-span-2">
+      <label class="block text-sm text-slate-600 mb-1">Date & time</label>
+      <input id="log-dt" type="datetime-local" class="w-full rounded-md border px-3 py-2" />
+    </div>
+
+    <!-- Action button -->
+    <div class="md:col-span-2 lg:col-span-1">
+      <label class="block text-sm text-transparent mb-1">Action</label>
+      <button id="primaryBtn" type="submit" class="w-full px-4 py-2 bg-indigo-600 text-white rounded-md">
+        Add 
+      </button>
+    </div>
+
+    <!-- Export button (hidden until data) -->
+    <div class="md:col-span-1 lg:col-span-1">
+      <label class="block text-sm text-transparent mb-1">Export</label>
+      <button id="downloadBtn" type="button" class="w-full px-3 py-2 bg-slate-200 text-slate-700 rounded-md hidden">
+        Export PNG
+      </button>
+    </div>
+
+  </form>
+
+  <div id="search-msg" class="text-sm text-red-500 mt-2 hidden"></div>
+  <div id="log-msg" class="text-sm text-emerald-600 mt-2 hidden"></div>
+</div>
+
+<!-- CHART -->
+<div class="bg-white p-4 rounded-xl shadow">
+  <div class="relative" style="min-height:320px;">
+    <canvas id="chart"></canvas>
+    <div id="no-data" class="absolute inset-0 flex items-center justify-center text-slate-500 hidden">
+      <div>
+        <div class="text-lg font-medium mb-2">No data yet</div>
+        <div class="text-sm">Add logs above → press Add & Load</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+/* ---- Helpers ---- */
+function parseDateObject(obj) {
+  if (!obj) return null;
+  const fields = ["performed_at","datetime","created_at"];
+  for (const f of fields) {
+    if (obj[f]) {
+      const d = new Date(obj[f]);
+      if (!isNaN(d.valueOf())) return d;
+    }
+  }
+  return null;
+}
+
+function toNumberLoose(v){
+  if (v === null || v === undefined || v === "") return NaN;
+  const cleaned = String(v).replace(/[^\d.\-]/g,"");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function parseSets(v){
+  if (v === null || v === undefined || v === "") return NaN;
+  const m = String(v).match(/(\d+)/);
+  return m ? Number(m[1]) : NaN;
+}
+
+function parseReps(v){
+  if (v === null || v === undefined || v === "") return NaN;
+  const s = String(v).trim();
+  const x = s.match(/^(\d+)[xX](\d+)$/);
+  if (x) return Number(x[2]);
+  const m = s.match(/(\d+)/);
+  return m ? Number(m[1]) : NaN;
+}
+
+/* DOM */
+const noDataEl = document.getElementById('no-data');
+const chartCanvas = document.getElementById('chart');
+const exerciseInput = document.getElementById('exercise');
+const downloadBtn = document.getElementById('downloadBtn');
+const logMsgEl = document.getElementById('log-msg');
+const searchMsgEl = document.getElementById('search-msg');
+
+let chart = null;
+
+function renderChart(labels, volumes){
+  if (!labels || !labels.length){
+    if (chart){ chart.destroy(); chart = null; }
+    noDataEl.classList.remove("hidden");
+    downloadBtn.classList.add("hidden");
+    return;
+  }
+  noDataEl.classList.add("hidden");
+  downloadBtn.classList.remove("hidden");
+
+  const ctx = chartCanvas.getContext("2d");
+  if (!chart){
+    chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets:[{
+          label:"Total Volume",
+          data: volumes,
+          borderWidth: 2,
+          fill: true,
+          tension: 0.2,
+          backgroundColor: "rgba(16,185,129,0.12)",
+          borderColor: "rgb(16,185,129)"
+        }]
+      },
+      options:{
+        responsive:true,
+        maintainAspectRatio:false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          x: { title: { display: true, text: 'Date' } },
+          y: { title: { display: true, text: 'Total Volume (kg × sets × reps)' }, beginAtZero: true }
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = volumes;
+    chart.update();
+  }
+}
+
+async function fetchProgress(ex){
+  const r = await fetch(`/api/logs/progress?exercise=${encodeURIComponent(ex)}`);
+  if (!r.ok) {
+    // try raw logs fallback
+    const r2 = await fetch(`/api/logs?exercise=${encodeURIComponent(ex)}`);
+    if (!r2.ok) throw new Error('No data');
+    return r2.json();
+  }
+  return r.json();
+}
+
+async function addLogIfProvided(){
+  const ex = exerciseInput.value.trim();
+  if (!ex){ searchMsgEl.innerText = "Enter an exercise"; searchMsgEl.classList.remove("hidden"); return; }
+  searchMsgEl.classList.add("hidden");
+
+  const w = toNumberLoose(document.getElementById("log-weight").value);
+  const s = parseSets(document.getElementById("log-sets").value);
+  const r = parseReps(document.getElementById("log-reps").value);
+  const dt = document.getElementById("log-dt").value;
+  const iso = dt ? new Date(dt).toISOString() : new Date().toISOString();
+
+  const shouldPost = Number.isFinite(w) && Number.isFinite(s) && Number.isFinite(r);
+
+  if (shouldPost){
+    const body = { exercise:ex, weight:w, sets:s, reps:r, performed_at:iso };
+    const resp = await fetch("/api/logs", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)
+    });
+    if (!resp.ok){
+      logMsgEl.innerText = "Error saving: " + await resp.text();
+      logMsgEl.classList.remove("hidden");
+      return;
+    }
+    logMsgEl.innerText = "Logged!";
+    logMsgEl.classList.remove("hidden");
+  }
+
+  // fetch processed progress or raw fallback
+  try {
+    const progress = await fetchProgress(ex);
+
+    // handle processed format { labels:[], datasets: { volume: [] } }
+    let labels = [];
+    let vols = [];
+    if (Array.isArray(progress)) {
+      // raw logs -> aggregate client side
+      const buckets = {};
+      progress.forEach(rw => {
+        const d = parseDateObject(rw) || new Date();
+        const day = d.toISOString().slice(0,10);
+        const w2 = toNumberLoose(rw.weight ?? rw.w ?? rw.weight_kg);
+        const s2 = parseSets(rw.sets ?? rw.set ?? rw.s);
+        const rp2 = parseReps(rw.reps ?? rw.rep ?? rw.r);
+        const vol = (Number.isFinite(w2) && Number.isFinite(s2) && Number.isFinite(rp2)) ? (w2 * s2 * rp2) : 0;
+        buckets[day] = (buckets[day]||0) + vol;
+      });
+      labels = Object.keys(buckets).sort();
+      vols = labels.map(d => Math.round((buckets[d]+Number.EPSILON)*100)/100);
+    } else {
+      labels = progress.labels || [];
+      vols = (progress.datasets && (progress.datasets.volume || progress.datasets.volumes || [])) || [];
+    }
+
+    if (!labels.length) {
+      renderChart([], []);
+      searchMsgEl.innerText = 'No numeric data returned from server for that exercise.';
+      searchMsgEl.classList.remove('hidden');
+    } else {
+      searchMsgEl.classList.add('hidden');
+      renderChart(labels, vols);
+    }
+  } catch (err) {
+    renderChart([], []);
+    searchMsgEl.innerText = 'Failed to load progress: ' + (err.message || err);
+    searchMsgEl.classList.remove('hidden');
+  }
+}
+
+document.getElementById("combinedForm").addEventListener("submit", e=>{
+  e.preventDefault();
+  addLogIfProvided();
+});
+
+document.getElementById("downloadBtn").addEventListener("click", ()=>{
+  if (!chart) return;
+  const a = document.createElement("a");
+  a.href = chart.toBase64Image();
+  a.download = (exerciseInput.value || "progress") + ".png";
+  a.click();
+});
+
+exerciseInput.focus();
+</script>
+
+</body>
+</html>
